@@ -1,10 +1,12 @@
 import sys
-from PyQt6.QtWidgets import QApplication, Qlabel
+from PyQt6.QtWidgets import QApplication, QLabel
 
 app = QApplication(sys.argv)
-app.setQuitOnastWindowClosed(False)
+app.setQuitOnLastWindowClosed(False)
 
-label = Qlabel("Nova is running")
+label = QLabel("Nova is running")
 label.show()
 
 sys.exit(app.exec())
+
+# Step 1 Completed
