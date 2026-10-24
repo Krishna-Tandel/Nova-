@@ -1,10 +1,11 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QApplication
 from PyQt6.QtCore import Qt, QPropertyAnimation, QPoint, QEasingCurve, QTimer, QEvent
+from core.actions import run_command
 
-STRIP = 8        # pixels still visible when the panel is hidden
-MARGIN = 10      # gap from the screen edge when the panel is open
-SLIDE_MS = 220   # slide animation time
-HIDE_DELAY = 400 # wait before sliding back in after the mouse leaves
+STRIP = 8         # pixels still visible when the panel is hidden
+MARGIN = 10       # gap from the screen edge when the panel is open
+SLIDE_MS = 220    # slide animation time
+HIDE_DELAY = 400  # wait before sliding back in after the mouse leaves
 
 
 class Panel(QWidget):
@@ -20,7 +21,6 @@ class Panel(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        # Needed so the stylesheet background actually paints
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         # --- Layout ---
@@ -159,7 +159,7 @@ class Panel(QWidget):
     def on_enter(self):
         text = self.input.text().strip()
         if text:
-            self.reply.setText(f"You said: {text}")
+            self.reply.setText(run_command(text))
             self.input.clear()
 
     def keyPressEvent(self, event):
