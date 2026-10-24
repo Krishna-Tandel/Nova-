@@ -1,14 +1,15 @@
 import sys
 import os
 import signal
+import keyboard
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QFont
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
 from ui.panel import Panel
 
-# Folder where main.py lives, so the icon path works from anywhere
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
+HOTKEY = "ctrl+space"
 
 
 def make_fallback_icon():
@@ -27,6 +28,12 @@ def make_fallback_icon():
     return QIcon(pix)
 
 
+# The hotkey runs in a different thread, so it can't touch the UI directly.
+# It emits this signal, and Qt runs the connected function safely.
+class HotkeySignals(QObject):
+    toggle = pyqtSignal()
+
+
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
 
@@ -39,20 +46,29 @@ timer.start(200)
 panel = Panel()
 panel.show()
 
-# --- Icon (with diagnostics) ---
-print("Icon path:", ICON_PATH)
-print("File exists:", os.path.exists(ICON_PATH))
-print("Tray available:", QSystemTrayIcon.isSystemTrayAvailable())
-
 icon = QIcon(ICON_PATH)
 if icon.isNull():
-    print("icon.png not found or unreadable -> using fallback icon")
     icon = make_fallback_icon()
+app.setWindowIcon(icon)
+
+
+def show_panel():
+    panel.show()
+    panel.raise_()
+    panel.activateWindow()
+    panel.input.setFocus()
+
+
+def toggle_panel():
+    if panel.isVisible():
+        panel.hide()
+    else:
+        show_panel()
+
 
 # --- System tray ---
 tray = QSystemTrayIcon(icon, app)
 tray.setToolTip("Nova")
-app.setWindowIcon(icon)
 
 menu = QMenu()
 show_action = QAction("Show", menu)
@@ -62,24 +78,22 @@ menu.addAction(quit_action)
 tray.setContextMenu(menu)
 
 
-def show_panel():
-    panel.show()
-    panel.raise_()
-    panel.activateWindow()
-
-
 def on_tray_click(reason):
-    # Left-click toggles the panel
     if reason == QSystemTrayIcon.ActivationReason.Trigger:
-        if panel.isVisible():
-            panel.hide()
-        else:
-            show_panel()
+        toggle_panel()
 
 
 show_action.triggered.connect(show_panel)
 quit_action.triggered.connect(app.quit)
 tray.activated.connect(on_tray_click)
 tray.show()
+
+# --- Global hotkey ---
+hotkey_signals = HotkeySignals()
+hotkey_signals.toggle.connect(toggle_panel)
+keyboard.add_hotkey(HOTKEY, hotkey_signals.toggle.emit)
+
+# Remove the hotkey when the app closes
+app.aboutToQuit.connect(keyboard.unhook_all)
 
 sys.exit(app.exec())
