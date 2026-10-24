@@ -13,7 +13,6 @@ HOTKEY = "ctrl+space"
 
 
 def make_fallback_icon():
-    """Draws a purple 'N' icon in code, used if icon.png is missing."""
     pix = QPixmap(64, 64)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
@@ -28,8 +27,6 @@ def make_fallback_icon():
     return QIcon(pix)
 
 
-# The hotkey runs in a different thread, so it can't touch the UI directly.
-# It emits this signal, and Qt runs the connected function safely.
 class HotkeySignals(QObject):
     toggle = pyqtSignal()
 
@@ -37,34 +34,18 @@ class HotkeySignals(QObject):
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
 
-# Make Ctrl+C in the terminal work
 signal.signal(signal.SIGINT, lambda *args: app.quit())
 timer = QTimer()
 timer.timeout.connect(lambda: None)
 timer.start(200)
 
 panel = Panel()
-panel.show()
+panel.dock()   # start hidden at the right edge
 
 icon = QIcon(ICON_PATH)
 if icon.isNull():
     icon = make_fallback_icon()
 app.setWindowIcon(icon)
-
-
-def show_panel():
-    panel.show()
-    panel.raise_()
-    panel.activateWindow()
-    panel.input.setFocus()
-
-
-def toggle_panel():
-    if panel.isVisible():
-        panel.hide()
-    else:
-        show_panel()
-
 
 # --- System tray ---
 tray = QSystemTrayIcon(icon, app)
@@ -80,20 +61,18 @@ tray.setContextMenu(menu)
 
 def on_tray_click(reason):
     if reason == QSystemTrayIcon.ActivationReason.Trigger:
-        toggle_panel()
+        panel.toggle()
 
 
-show_action.triggered.connect(show_panel)
+show_action.triggered.connect(lambda: panel.slide_out(focus=True))
 quit_action.triggered.connect(app.quit)
 tray.activated.connect(on_tray_click)
 tray.show()
 
 # --- Global hotkey ---
 hotkey_signals = HotkeySignals()
-hotkey_signals.toggle.connect(toggle_panel)
+hotkey_signals.toggle.connect(panel.toggle)
 keyboard.add_hotkey(HOTKEY, hotkey_signals.toggle.emit)
-
-# Remove the hotkey when the app closes
 app.aboutToQuit.connect(keyboard.unhook_all)
 
 sys.exit(app.exec())
