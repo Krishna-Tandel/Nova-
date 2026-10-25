@@ -8,7 +8,7 @@ KEYWORDS = {
     "notepad": ["write", "writing", "note", "notes", "text editor", "jot", "type something"],
     "calculator": ["calculate", "calculation", "math", "maths", "add numbers"],
     "paint": ["draw", "drawing", "sketch", "paint"],
-    "file explorer": ["files", "folder", "folders", "documents", "explorer"],
+    "file explorer": ["files", "explorer"],
     "task manager": ["task manager", "processes", "running programs"],
     "settings": ["settings", "wifi settings", "display settings"],
     "chrome": ["browser", "browse", "internet", "web browser"],
@@ -29,6 +29,10 @@ SEARCH_KEEP = ("what is", "what are", "who is", "who was", "how to", "how do",
 SEARCH_STRIP = ("look up ", "lookup ", "find out ", "find ", "tell me about ")
 
 PC_WORDS = {"pc", "computer", "laptop", "system"}
+
+FOLDER_WORDS = ("downloads", "documents", "desktop", "pictures", "music", "videos")
+UP_WORDS = {"up", "increase", "raise", "louder", "higher"}
+DOWN_WORDS = {"down", "decrease", "lower", "reduce", "quieter", "softer"}
 
 
 def _clean(text):
@@ -55,8 +59,8 @@ def _chat(reply):
     return {"action": "chat", "reply": reply}
 
 
-def _system(action):
-    return {"action": action, "reply": ""}
+def _system(action, target=""):
+    return {"action": action, "target": target, "reply": ""}
 
 
 def ask_brain(text):
@@ -78,8 +82,8 @@ def ask_brain(text):
     if ("date" in words or "today" in words) and ("what" in words or "tell" in words or len(words) == 1):
         return _chat("Today is " + datetime.now().strftime("%A, %d %B %Y"))
     if t == "help" or "what can you do" in t:
-        return _chat("Try: open notepad, search python, lock pc, shutdown, "
-                     "or say what you want, like 'I want to write something'.")
+        return _chat("Try: open notepad, search python, volume up, set volume 40, "
+                     "mute, screenshot, open downloads folder, lock pc, shutdown.")
 
     # ---------- Web search ----------
     for prefix in SEARCH_STRIP:
@@ -88,8 +92,25 @@ def ask_brain(text):
     if t.startswith(SEARCH_KEEP):
         return _search(t)
 
+    # ---------- Screenshot ----------
+    if re.search(r"screen\s?shot|capture (the )?screen|screen capture", t):
+        return _system("screenshot")
+
+    # ---------- Volume ----------
+    if re.search(r"\b(mute|unmute)\b", t):
+        return _system("volume_mute")
+    vol = re.search(r"\b(volume|sound)\b\D*(\d{1,3})\b", t)
+    if vol:
+        return _system("volume_set", vol.group(2))
+    wordset = set(words)
+    if ({"volume", "sound"} & wordset) or ({"louder", "quieter"} & wordset):
+        if UP_WORDS & wordset:
+            return _system("volume_up")
+        if DOWN_WORDS & wordset:
+            return _system("volume_down")
+
     # ---------- System commands ----------
-    has_pc = bool(PC_WORDS & set(words))
+    has_pc = bool(PC_WORDS & wordset)
     if re.search(r"\b(cancel|abort)\b", t) and re.search(r"\b(shutdown|shut down|restart|reboot)\b", t):
         return _system("cancel_shutdown")
     if re.search(r"\b(shutdown|shut down)\b", t) or (has_pc and re.search(r"\b(turn off|power off)\b", t)):
@@ -99,10 +120,18 @@ def ask_brain(text):
     if "lock" in words and (has_pc or "screen" in words or len(words) == 1):
         return _system("lock")
 
-    # ---------- Open an app ----------
     names = _known_names()
     is_open = bool(difflib.get_close_matches(words[0], OPEN_WORDS, n=1, cutoff=0.7))
 
+    # ---------- Open a folder ----------
+    for folder in FOLDER_WORDS:
+        if folder in words:
+            said_folder = "folder" in words or "folders" in words
+            simple = is_open and folder in ("downloads", "documents", "desktop")
+            if said_folder or simple:
+                return _system("folder", folder)
+
+    # ---------- Open an app ----------
     if is_open:
         rest = [w for w in words[1:] if w not in FILLER]
         target = " ".join(rest)

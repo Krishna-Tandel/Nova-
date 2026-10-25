@@ -9,6 +9,8 @@ LOG_PATH = os.path.join(DATA_DIR, "log.txt")
 ALLOWED_ACTIONS = {
     "open", "search", "chat",
     "lock", "shutdown", "restart", "cancel_shutdown",
+    "volume_up", "volume_down", "volume_mute", "volume_set",
+    "screenshot", "folder",
 }
 
 # These wait for you to type "yes" before they run

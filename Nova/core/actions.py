@@ -1,12 +1,17 @@
 import os
+import time
 import subprocess
 import webbrowser
+from datetime import datetime
 from urllib.parse import quote_plus
+
+import keyboard
 
 from core.brain import ask_brain
 from core.safety import log_action, is_allowed, needs_confirmation
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+HOME = os.path.expanduser("~")
 
 # App name you type -> what Windows should launch.
 # To add your own app, add a line with its full path, for example:
@@ -31,6 +36,15 @@ WEBSITES = {
     "google": "https://www.google.com",
     "github": "https://github.com",
     "gmail": "https://mail.google.com",
+}
+
+FOLDERS = {
+    "downloads": "Downloads",
+    "documents": "Documents",
+    "desktop": "Desktop",
+    "pictures": "Pictures",
+    "music": "Music",
+    "videos": "Videos",
 }
 
 
@@ -75,6 +89,63 @@ def web_search(query):
     return f"Searching for: {query}"
 
 
+def open_folder(name):
+    sub = FOLDERS.get(name)
+    if not sub:
+        return "I don't know that folder."
+    path = os.path.join(HOME, sub)
+    if os.path.isdir(path):
+        os.startfile(path)
+        return f"Opening your {name} folder..."
+    return f"I couldn't find your {name} folder."
+
+
+# ---------- Volume (uses the keyboard's volume keys; each press is about 2%) ----------
+def _press(key, times):
+    for _ in range(times):
+        keyboard.send(key)
+        time.sleep(0.01)
+
+
+def volume_up():
+    _press("volume up", 5)
+    return "Volume up."
+
+
+def volume_down():
+    _press("volume down", 5)
+    return "Volume down."
+
+
+def volume_mute():
+    keyboard.send("volume mute")
+    return "Toggled mute."
+
+
+def set_volume(level):
+    try:
+        n = max(0, min(100, int(level)))
+    except ValueError:
+        return "Tell me a number from 0 to 100."
+    _press("volume down", 50)          # go to zero first
+    _press("volume up", round(n / 2))  # then climb up
+    return f"Volume set to about {n}%."
+
+
+# ---------- Screenshot ----------
+def take_screenshot():
+    try:
+        from PIL import ImageGrab
+    except ImportError:
+        return "Screenshots need Pillow. Run: pip install pillow"
+    folder = os.path.join(HOME, "Pictures", "Nova Screenshots")
+    os.makedirs(folder, exist_ok=True)
+    name = datetime.now().strftime("screenshot_%Y-%m-%d_%H-%M-%S.png")
+    path = os.path.join(folder, name)
+    ImageGrab.grab().save(path)
+    return f"Screenshot saved: {name} (in Pictures\\Nova Screenshots)"
+
+
 # ---------- PC commands ----------
 def lock_pc():
     subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"], creationflags=NO_WINDOW)
@@ -104,6 +175,14 @@ SYSTEM = {
     "shutdown": (shutdown_pc, "shut down your PC"),
     "restart": (restart_pc, "restart your PC"),
     "cancel_shutdown": (cancel_shutdown, "cancel the shutdown"),
+}
+
+# Safe actions that run straight away
+SIMPLE = {
+    "volume_up": volume_up,
+    "volume_down": volume_down,
+    "volume_mute": volume_mute,
+    "screenshot": take_screenshot,
 }
 
 
@@ -169,6 +248,21 @@ def run_command(text):
             return f"Do you really want to {question}? Type yes to confirm or no to cancel.", pending
         result = func()
         log_action(action, "", "done")
+        return result, None
+
+    if action in SIMPLE:
+        result = SIMPLE[action]()
+        log_action(action, "", "done")
+        return result, None
+
+    if action == "volume_set":
+        result = set_volume(target)
+        log_action(action, target, "done")
+        return result, None
+
+    if action == "folder":
+        result = open_folder(target)
+        log_action(action, target, "done")
         return result, None
 
     if action == "open":
