@@ -4,7 +4,6 @@ from datetime import datetime
 
 # Words in a sentence -> which app or website to open.
 # The names on the left must match the keys in APPS / WEBSITES (actions.py).
-# Add your own words here any time.
 KEYWORDS = {
     "notepad": ["write", "writing", "note", "notes", "text editor", "jot", "type something"],
     "calculator": ["calculate", "calculation", "math", "maths", "add numbers"],
@@ -22,15 +21,14 @@ KEYWORDS = {
 
 OPEN_WORDS = ["open", "launch", "start", "run"]
 
-# Words ignored when working out which app you mean
 FILLER = {"the", "my", "a", "an", "please", "app", "application", "program",
           "for", "me", "to", "can", "you", "could", "up"}
 
-# Questions that become a web search (the whole sentence is searched)
 SEARCH_KEEP = ("what is", "what are", "who is", "who was", "how to", "how do",
                "how does", "why is", "why do", "where is", "when is")
-# Phrases that are removed first, and the rest is searched
 SEARCH_STRIP = ("look up ", "lookup ", "find out ", "find ", "tell me about ")
+
+PC_WORDS = {"pc", "computer", "laptop", "system"}
 
 
 def _clean(text):
@@ -40,7 +38,7 @@ def _clean(text):
 
 
 def _known_names():
-    # Imported here (not at the top) so the two files don't import each other in a loop
+    # Imported here so the two files don't import each other in a loop
     from core import actions
     return list(actions.APPS.keys()) + list(actions.WEBSITES.keys())
 
@@ -55,6 +53,10 @@ def _search(query):
 
 def _chat(reply):
     return {"action": "chat", "reply": reply}
+
+
+def _system(action):
+    return {"action": action, "reply": ""}
 
 
 def ask_brain(text):
@@ -76,7 +78,8 @@ def ask_brain(text):
     if ("date" in words or "today" in words) and ("what" in words or "tell" in words or len(words) == 1):
         return _chat("Today is " + datetime.now().strftime("%A, %d %B %Y"))
     if t == "help" or "what can you do" in t:
-        return _chat("Try: open notepad, search python, or say what you want, like 'I want to write something'.")
+        return _chat("Try: open notepad, search python, lock pc, shutdown, "
+                     "or say what you want, like 'I want to write something'.")
 
     # ---------- Web search ----------
     for prefix in SEARCH_STRIP:
@@ -84,6 +87,17 @@ def ask_brain(text):
             return _search(t[len(prefix):])
     if t.startswith(SEARCH_KEEP):
         return _search(t)
+
+    # ---------- System commands ----------
+    has_pc = bool(PC_WORDS & set(words))
+    if re.search(r"\b(cancel|abort)\b", t) and re.search(r"\b(shutdown|shut down|restart|reboot)\b", t):
+        return _system("cancel_shutdown")
+    if re.search(r"\b(shutdown|shut down)\b", t) or (has_pc and re.search(r"\b(turn off|power off)\b", t)):
+        return _system("shutdown")
+    if re.search(r"\b(restart|reboot)\b", t):
+        return _system("restart")
+    if "lock" in words and (has_pc or "screen" in words or len(words) == 1):
+        return _system("lock")
 
     # ---------- Open an app ----------
     names = _known_names()
@@ -104,7 +118,7 @@ def ask_brain(text):
             if re.search(r"\b" + re.escape(kw) + r"\b", t):
                 return _open(name)
 
-    # Typos in a single word, like "open notepd" (only when the user said open)
+    # Typos in a single word, like "open notepd"
     if is_open:
         for w in words[1:]:
             if len(w) >= 5:

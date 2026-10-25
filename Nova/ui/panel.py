@@ -1,11 +1,31 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QApplication
-from PyQt6.QtCore import Qt, QPropertyAnimation, QPoint, QEasingCurve, QTimer, QEvent
-from core.actions import run_command
+from PyQt6.QtCore import (Qt, QPropertyAnimation, QPoint, QEasingCurve,
+                          QTimer, QEvent, QThread, pyqtSignal)
+from core.actions import run_command, confirm_pending, cancel_pending
 
 STRIP = 8         # pixels still visible when the panel is hidden
 MARGIN = 10       # gap from the screen edge when the panel is open
 SLIDE_MS = 220    # slide animation time
 HIDE_DELAY = 400  # wait before sliding back in after the mouse leaves
+
+NORMAL_HINT = "Type a command..."
+CONFIRM_HINT = "Type yes or no..."
+
+
+class CommandWorker(QThread):
+    """Runs a command in the background so the UI never freezes."""
+    done = pyqtSignal(str, object)
+
+    def __init__(self, text):
+        super().__init__()
+        self.text = text
+
+    def run(self):
+        try:
+            reply, pending = run_command(self.text)
+            self.done.emit(reply, pending)
+        except Exception as e:
+            self.done.emit(f"Error: {type(e).__name__}", None)
 
 
 class Panel(QWidget):
@@ -14,6 +34,8 @@ class Panel(QWidget):
         self.setWindowTitle("Nova")
         self.resize(420, 220)
         self.expanded = False
+        self.worker = None
+        self.pending = None   # an action waiting for yes / no
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -37,7 +59,7 @@ class Panel(QWidget):
         self.reply.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         self.input = QLineEdit()
-        self.input.setPlaceholderText("Type a command...")
+        self.input.setPlaceholderText(NORMAL_HINT)
         self.input.returnPressed.connect(self.on_enter)
 
         layout.addWidget(self.title)
@@ -119,6 +141,9 @@ class Panel(QWidget):
             self.input.setFocus()
 
     def slide_in(self):
+        # A waiting confirmation is cancelled when the panel hides,
+        # so a stray "yes" later can never trigger it
+        self._clear_pending()
         _, closed_pos = self._points()
         self.expanded = False
         self.input.clearFocus()
@@ -143,24 +168,53 @@ class Panel(QWidget):
         super().leaveEvent(event)
 
     def changeEvent(self, event):
-        # Lost focus (clicked another app): schedule a slide back in
         if event.type() == QEvent.Type.ActivationChange:
             if self.expanded and not self.isActiveWindow():
                 self.hide_timer.start()
         super().changeEvent(event)
 
     def try_collapse(self):
-        # Stay open while the mouse is over the panel or you are typing
-        if self.underMouse() or self.input.hasFocus():
+        busy = self.worker is not None and self.worker.isRunning()
+        if self.underMouse() or self.input.hasFocus() or busy:
             return
         self.slide_in()
+
+    # ---------- Confirmation ----------
+    def _clear_pending(self):
+        if self.pending is not None:
+            cancel_pending(self.pending)
+            self.pending = None
+            self.input.setPlaceholderText(NORMAL_HINT)
 
     # ---------- Input ----------
     def on_enter(self):
         text = self.input.text().strip()
-        if text:
-            self.reply.setText(run_command(text))
-            self.input.clear()
+        if not text:
+            return
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self.input.clear()
+
+        # An action is waiting for yes / no
+        if self.pending is not None:
+            pending, self.pending = self.pending, None
+            self.input.setPlaceholderText(NORMAL_HINT)
+            if text.lower() in ("yes", "y"):
+                self.reply.setText(confirm_pending(pending))
+            else:
+                self.reply.setText(cancel_pending(pending))
+            return
+
+        self.reply.setText("Thinking...")
+        self.worker = CommandWorker(text)
+        self.worker.done.connect(self.show_reply)
+        self.worker.start()
+
+    def show_reply(self, text, pending):
+        self.reply.setText(text)
+        self.pending = pending
+        if pending is not None:
+            self.input.setPlaceholderText(CONFIRM_HINT)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:

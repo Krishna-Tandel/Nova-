@@ -6,10 +6,12 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QFont
 from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
 from ui.panel import Panel
+from core.safety import log_action
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
 HOTKEY = "ctrl+space"
+EMERGENCY_HOTKEY = "ctrl+alt+q"
 
 
 def make_fallback_icon():
@@ -27,8 +29,10 @@ def make_fallback_icon():
     return QIcon(pix)
 
 
+# Hotkeys run in a different thread, so they talk to the UI through signals
 class HotkeySignals(QObject):
     toggle = pyqtSignal()
+    stop = pyqtSignal()
 
 
 app = QApplication(sys.argv)
@@ -69,10 +73,22 @@ quit_action.triggered.connect(app.quit)
 tray.activated.connect(on_tray_click)
 tray.show()
 
-# --- Global hotkey ---
+
+# --- Emergency stop ---
+def emergency_stop():
+    log_action("emergency stop", "Nova closed with Ctrl+Alt+Q", "stopped")
+    app.quit()
+
+
+# --- Global hotkeys ---
 hotkey_signals = HotkeySignals()
 hotkey_signals.toggle.connect(panel.toggle)
+hotkey_signals.stop.connect(emergency_stop)
 keyboard.add_hotkey(HOTKEY, hotkey_signals.toggle.emit)
+keyboard.add_hotkey(EMERGENCY_HOTKEY, hotkey_signals.stop.emit)
+
+app.aboutToQuit.connect(lambda: log_action("nova", "closed", "stopped"))
 app.aboutToQuit.connect(keyboard.unhook_all)
 
+log_action("nova", "started", "started")
 sys.exit(app.exec())
