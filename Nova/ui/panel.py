@@ -71,7 +71,8 @@ class Panel(QWidget):
         self.expanded = False
         self.worker = None
         self.voice = None
-        self.pending = None   # an action waiting for yes / no
+        self.pending = None        # an action waiting for yes / no
+        self.spoken_text = None    # text heard by voice, run after the mic thread ends
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -198,6 +199,10 @@ class Panel(QWidget):
             f'<span style="color:{color};"><b>{name}</b></span><br>'
             f'<span style="color:#cdd6f4;">{safe}</span></p>'
         )
+        # Scroll to the newest message (after the layout has updated)
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _scroll_to_bottom(self):
         bar = self.chat.verticalScrollBar()
         bar.setValue(bar.maximum())
 
@@ -273,14 +278,15 @@ class Panel(QWidget):
                 self.hide_timer.start()
         super().changeEvent(event)
 
-    def _busy(self):
-        thinking = self.worker is not None and self.worker.isRunning()
-        listening = self.voice is not None and self.voice.isRunning()
-        return thinking or listening
+    def _thinking(self):
+        return self.worker is not None and self.worker.isRunning()
+
+    def _listening(self):
+        return self.voice is not None and self.voice.isRunning()
 
     def try_collapse(self):
         # Stay open while the mouse is over the panel, you are typing, or Nova is busy
-        if self.underMouse() or self.input.hasFocus() or self._busy():
+        if self.underMouse() or self.input.hasFocus() or self._thinking() or self._listening():
             return
         self.slide_in()
 
@@ -293,17 +299,20 @@ class Panel(QWidget):
 
     # ---------- Sending a command (typed or spoken) ----------
     def on_enter(self):
-        if self._busy():
-            return
         text = self.input.text().strip()
         if not text:
+            return
+        if self._thinking() or self._listening():
             return
         self.input.clear()
         self.submit(text)
 
     def submit(self, text, spoken=False):
         text = text.strip()
-        if not text or self._busy():
+        if not text:
+            return
+        if self._thinking():
+            self.add_message("nova", "Still working on the last command...")
             return
 
         self.input.remember(text)
@@ -341,8 +350,9 @@ class Panel(QWidget):
 
     # ---------- Voice ----------
     def start_voice(self):
-        if self._busy():
+        if self._thinking() or self._listening():
             return
+        self.spoken_text = None
         self.slide_out()
         self.mic.setEnabled(False)
         self.set_status("Starting mic...")
@@ -354,9 +364,8 @@ class Panel(QWidget):
         self.voice.start()
 
     def on_voice_heard(self, text):
-        self.set_status("Ready")
-        # The voice thread is finishing; let it end before running the command
-        QTimer.singleShot(50, lambda: self.submit(text, spoken=True))
+        # Just remember it. It runs when the mic thread has fully finished.
+        self.spoken_text = text
 
     def on_voice_failed(self, message):
         self.add_message("nova", message)
@@ -364,6 +373,10 @@ class Panel(QWidget):
 
     def on_voice_finished(self):
         self.mic.setEnabled(True)
+        text, self.spoken_text = self.spoken_text, None
+        if text:
+            self.set_status("Ready")
+            QTimer.singleShot(0, lambda: self.submit(text, spoken=True))
 
     def shutdown_workers(self):
         """Called when Nova quits, so no background thread is left running."""

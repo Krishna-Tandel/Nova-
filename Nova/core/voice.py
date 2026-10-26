@@ -2,6 +2,7 @@ import os
 import json
 import time
 import queue
+import traceback
 from PyQt6.QtCore import QThread, pyqtSignal
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,7 +88,9 @@ class VoiceWorker(QThread):
                     self.failed.emit("Voice model not found in the models folder.")
                     return
                 self.status.emit("Loading voice...")
+                print("[voice] loading model:", path)
                 _model = Model(path)
+                print("[voice] model loaded")
 
             grammar = json.dumps(build_commands() + ["[unk]"])
             rec = KaldiRecognizer(_model, SAMPLE_RATE, grammar)
@@ -97,6 +100,7 @@ class VoiceWorker(QThread):
                 audio.put(bytes(indata))
 
             self.status.emit("Listening...")
+            print("[voice] listening...")
             deadline = time.time() + LISTEN_SECONDS
 
             with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=4000, dtype="int16",
@@ -109,13 +113,17 @@ class VoiceWorker(QThread):
                     if rec.AcceptWaveform(data):
                         text = _clean(rec.Result())
                         if text:
+                            print("[voice] heard:", text)
                             self.heard.emit(to_command(text))
                             return
                 final = _clean(rec.FinalResult())
                 if final:
+                    print("[voice] heard:", final)
                     self.heard.emit(to_command(final))
                     return
 
+            print("[voice] nothing recognised")
             self.failed.emit("I didn't catch that. Try again.")
         except Exception as e:
-            self.failed.emit(f"Voice error: {type(e).__name__}")
+            traceback.print_exc()
+            self.failed.emit(f"Voice error: {type(e).__name__}: {e}")
