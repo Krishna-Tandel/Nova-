@@ -11,6 +11,7 @@ from core.safety import log_action
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
 HOTKEY = "ctrl+space"
+VOICE_HOTKEY = "ctrl+alt+space"
 EMERGENCY_HOTKEY = "ctrl+alt+q"
 
 
@@ -32,6 +33,7 @@ def make_fallback_icon():
 # Hotkeys run in a different thread, so they talk to the UI through signals
 class HotkeySignals(QObject):
     toggle = pyqtSignal()
+    listen = pyqtSignal()
     stop = pyqtSignal()
 
 
@@ -83,10 +85,13 @@ def emergency_stop():
 # --- Global hotkeys ---
 hotkey_signals = HotkeySignals()
 hotkey_signals.toggle.connect(panel.toggle)
+hotkey_signals.listen.connect(panel.start_voice)
 hotkey_signals.stop.connect(emergency_stop)
 keyboard.add_hotkey(HOTKEY, hotkey_signals.toggle.emit)
+keyboard.add_hotkey(VOICE_HOTKEY, hotkey_signals.listen.emit)
 keyboard.add_hotkey(EMERGENCY_HOTKEY, hotkey_signals.stop.emit)
 
+app.aboutToQuit.connect(panel.shutdown_workers)
 app.aboutToQuit.connect(lambda: log_action("nova", "closed", "stopped"))
 app.aboutToQuit.connect(keyboard.unhook_all)
 

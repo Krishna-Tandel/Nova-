@@ -1,7 +1,10 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QApplication
+import html
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+                             QPushButton, QTextBrowser, QApplication)
 from PyQt6.QtCore import (Qt, QPropertyAnimation, QPoint, QEasingCurve,
                           QTimer, QEvent, QThread, pyqtSignal)
 from core.actions import run_command, confirm_pending, cancel_pending
+from core.voice import VoiceWorker
 
 STRIP = 8         # pixels still visible when the panel is hidden
 MARGIN = 10       # gap from the screen edge when the panel is open
@@ -28,13 +31,46 @@ class CommandWorker(QThread):
             self.done.emit(f"Error: {type(e).__name__}", None)
 
 
+class HistoryLineEdit(QLineEdit):
+    """Text box where Up and Down recall earlier commands."""
+
+    def __init__(self):
+        super().__init__()
+        self.history = []
+        self.idx = 0
+        self.draft = ""
+
+    def remember(self, text):
+        if text and (not self.history or self.history[-1] != text):
+            self.history.append(text)
+        self.idx = len(self.history)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key.Key_Up and self.history:
+            if self.idx == len(self.history):
+                self.draft = self.text()
+            self.idx = max(0, self.idx - 1)
+            self.setText(self.history[self.idx])
+        elif key == Qt.Key.Key_Down and self.history:
+            if self.idx < len(self.history):
+                self.idx += 1
+                if self.idx == len(self.history):
+                    self.setText(self.draft)
+                else:
+                    self.setText(self.history[self.idx])
+        else:
+            super().keyPressEvent(event)
+
+
 class Panel(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Nova")
-        self.resize(420, 220)
+        self.resize(420, 440)
         self.expanded = False
         self.worker = None
+        self.voice = None
         self.pending = None   # an action waiting for yes / no
 
         self.setWindowFlags(
@@ -45,26 +81,47 @@ class Panel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        # --- Layout ---
-        layout = QVBoxLayout()
-        layout.setContentsMargins(24, 20, 20, 20)
-        layout.setSpacing(12)
-
+        # --- Header: title + status ---
         self.title = QLabel("Nova")
         self.title.setObjectName("title")
+        self.status = QLabel("Ready")
+        self.status.setObjectName("status")
 
-        self.reply = QLabel("How can I help you?")
-        self.reply.setObjectName("reply")
-        self.reply.setWordWrap(True)
-        self.reply.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        header = QHBoxLayout()
+        header.addWidget(self.title)
+        header.addStretch(1)
+        header.addWidget(self.status)
 
-        self.input = QLineEdit()
+        # --- Chat history ---
+        self.chat = QTextBrowser()
+        self.chat.setObjectName("chat")
+        self.chat.setOpenLinks(False)
+        self.chat.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        # --- Input row: text box + mic ---
+        self.input = HistoryLineEdit()
         self.input.setPlaceholderText(NORMAL_HINT)
         self.input.returnPressed.connect(self.on_enter)
 
-        layout.addWidget(self.title)
-        layout.addWidget(self.reply, 1)
-        layout.addWidget(self.input)
+        self.mic = QPushButton("🎤")
+        self.mic.setObjectName("mic")
+        self.mic.setToolTip("Speak a command (Ctrl+Alt+Space)")
+        self.mic.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.mic.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mic.clicked.connect(self.start_voice)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self.input, 1)
+        row.addWidget(self.mic)
+
+        # --- Main layout ---
+        layout = QVBoxLayout()
+        layout.setContentsMargins(24, 18, 18, 18)
+        layout.setSpacing(10)
+        layout.addLayout(header)
+        layout.addWidget(self.chat, 1)
+        layout.addLayout(row)
         self.setLayout(layout)
 
         self.setStyleSheet("""
@@ -78,8 +135,16 @@ class Panel(QWidget):
                 font-size: 18px;
                 font-weight: bold;
             }
-            QLabel#reply {
+            QLabel#status {
+                color: #9399b2;
+                font-size: 12px;
+            }
+            QTextBrowser#chat {
+                background-color: #181825;
                 color: #cdd6f4;
+                border: 1px solid #313244;
+                border-radius: 10px;
+                padding: 6px;
                 font-size: 14px;
             }
             QLineEdit {
@@ -93,6 +158,21 @@ class Panel(QWidget):
             QLineEdit:focus {
                 border: 1px solid #cba6f7;
             }
+            QPushButton#mic {
+                background-color: #313244;
+                border: 1px solid #45475a;
+                border-radius: 10px;
+                font-size: 16px;
+                min-width: 44px;
+                max-width: 44px;
+                padding: 6px;
+            }
+            QPushButton#mic:hover {
+                border: 1px solid #cba6f7;
+            }
+            QPushButton#mic:disabled {
+                background-color: #cba6f7;
+            }
         """)
 
         # --- Slide animation ---
@@ -105,6 +185,26 @@ class Panel(QWidget):
         self.hide_timer.setSingleShot(True)
         self.hide_timer.setInterval(HIDE_DELAY)
         self.hide_timer.timeout.connect(self.try_collapse)
+
+        self.add_message("nova", "How can I help you? Type a command, or press the mic and speak.")
+
+    # ---------- Chat display ----------
+    def add_message(self, who, text):
+        safe = html.escape(text).replace("\n", "<br>")
+        color = "#cba6f7" if who == "you" else "#a6e3a1"
+        name = "You" if who == "you" else "Nova"
+        self.chat.append(
+            f'<p style="margin-top:6px; margin-bottom:6px;">'
+            f'<span style="color:{color};"><b>{name}</b></span><br>'
+            f'<span style="color:#cdd6f4;">{safe}</span></p>'
+        )
+        bar = self.chat.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def set_status(self, text):
+        self.status.setText(text)
+        color = {"Listening...": "#a6e3a1", "Thinking...": "#f9e2af"}.get(text)
+        self.status.setStyleSheet(f"color: {color};" if color else "")
 
     # ---------- Positions ----------
     def _points(self):
@@ -173,9 +273,14 @@ class Panel(QWidget):
                 self.hide_timer.start()
         super().changeEvent(event)
 
+    def _busy(self):
+        thinking = self.worker is not None and self.worker.isRunning()
+        listening = self.voice is not None and self.voice.isRunning()
+        return thinking or listening
+
     def try_collapse(self):
-        busy = self.worker is not None and self.worker.isRunning()
-        if self.underMouse() or self.input.hasFocus() or busy:
+        # Stay open while the mouse is over the panel, you are typing, or Nova is busy
+        if self.underMouse() or self.input.hasFocus() or self._busy():
             return
         self.slide_in()
 
@@ -186,36 +291,88 @@ class Panel(QWidget):
             self.pending = None
             self.input.setPlaceholderText(NORMAL_HINT)
 
-    # ---------- Input ----------
+    # ---------- Sending a command (typed or spoken) ----------
     def on_enter(self):
+        if self._busy():
+            return
         text = self.input.text().strip()
         if not text:
             return
-        if self.worker is not None and self.worker.isRunning():
-            return
         self.input.clear()
+        self.submit(text)
+
+    def submit(self, text, spoken=False):
+        text = text.strip()
+        if not text or self._busy():
+            return
+
+        self.input.remember(text)
+        self.add_message("you", ("🎤 " if spoken else "") + text)
 
         # An action is waiting for yes / no
         if self.pending is not None:
-            pending, self.pending = self.pending, None
-            self.input.setPlaceholderText(NORMAL_HINT)
-            if text.lower() in ("yes", "y"):
-                self.reply.setText(confirm_pending(pending))
+            answer = text.lower()
+            if answer in ("yes", "y"):
+                if spoken:
+                    # Safety: a risky action must be confirmed by typing, never by voice
+                    self.add_message("nova", "For safety, please TYPE yes to confirm.")
+                    return
+                pending, self.pending = self.pending, None
+                self.input.setPlaceholderText(NORMAL_HINT)
+                self.add_message("nova", confirm_pending(pending))
             else:
-                self.reply.setText(cancel_pending(pending))
+                pending, self.pending = self.pending, None
+                self.input.setPlaceholderText(NORMAL_HINT)
+                self.add_message("nova", cancel_pending(pending))
+            self.set_status("Ready")
             return
 
-        self.reply.setText("Thinking...")
+        self.set_status("Thinking...")
         self.worker = CommandWorker(text)
         self.worker.done.connect(self.show_reply)
         self.worker.start()
 
     def show_reply(self, text, pending):
-        self.reply.setText(text)
+        self.add_message("nova", text)
         self.pending = pending
         if pending is not None:
             self.input.setPlaceholderText(CONFIRM_HINT)
+        self.set_status("Ready")
 
+    # ---------- Voice ----------
+    def start_voice(self):
+        if self._busy():
+            return
+        self.slide_out()
+        self.mic.setEnabled(False)
+        self.set_status("Starting mic...")
+        self.voice = VoiceWorker()
+        self.voice.status.connect(self.set_status)
+        self.voice.heard.connect(self.on_voice_heard)
+        self.voice.failed.connect(self.on_voice_failed)
+        self.voice.finished.connect(self.on_voice_finished)
+        self.voice.start()
+
+    def on_voice_heard(self, text):
+        self.set_status("Ready")
+        # The voice thread is finishing; let it end before running the command
+        QTimer.singleShot(50, lambda: self.submit(text, spoken=True))
+
+    def on_voice_failed(self, message):
+        self.add_message("nova", message)
+        self.set_status("Ready")
+
+    def on_voice_finished(self):
+        self.mic.setEnabled(True)
+
+    def shutdown_workers(self):
+        """Called when Nova quits, so no background thread is left running."""
+        for thread in (self.voice, self.worker):
+            if thread is not None and thread.isRunning():
+                thread.requestInterruption()
+                thread.wait(1500)
+
+    # ---------- Keys ----------
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.slide_in()

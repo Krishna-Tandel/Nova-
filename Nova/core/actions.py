@@ -15,7 +15,7 @@ HOME = os.path.expanduser("~")
 
 # App name you type -> what Windows should launch.
 # To add your own app, add a line with its full path, for example:
-# "spotify": r"C:\Users\Krish\AppData\Roaming\Spotify\Spotify.exe",
+# "discord": r"C:\Users\Krish\AppData\Local\Discord\Update.exe",
 APPS = {
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
@@ -29,6 +29,7 @@ APPS = {
     "chrome": "chrome",
     "edge": "msedge",
     "settings": "ms-settings:",
+    "spotify": "spotify:",
 }
 
 WEBSITES = {
