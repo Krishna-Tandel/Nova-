@@ -11,10 +11,11 @@ ALLOWED_ACTIONS = {
     "lock", "shutdown", "restart", "cancel_shutdown",
     "volume_up", "volume_down", "volume_mute", "volume_set",
     "screenshot", "folder",
+    "close", "type",
 }
 
 # These wait for you to type "yes" before they run
-NEEDS_CONFIRM = {"shutdown", "restart"}
+NEEDS_CONFIRM = {"shutdown", "restart", "close", "type"}
 
 
 def is_allowed(action):

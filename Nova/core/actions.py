@@ -7,11 +7,13 @@ from urllib.parse import quote_plus
 
 import keyboard
 
+from core import winfocus
 from core.brain import ask_brain
 from core.safety import log_action, is_allowed, needs_confirmation
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 HOME = os.path.expanduser("~")
+MAX_TYPE = 300  # longest text Nova will type in one go
 
 # App name you type -> what Windows should launch.
 # To add your own app, add a line with its full path, for example:
@@ -47,6 +49,20 @@ FOLDERS = {
     "music": "Music",
     "videos": "Videos",
 }
+
+# Apps Nova is allowed to close: name -> process names.
+# "explorer" is NOT here on purpose: closing it removes your taskbar.
+CLOSABLE = {
+    "notepad": ["notepad.exe"],
+    "calculator": ["CalculatorApp.exe", "Calculator.exe", "win32calc.exe"],
+    "paint": ["mspaint.exe"],
+    "chrome": ["chrome.exe"],
+    "edge": ["msedge.exe"],
+    "spotify": ["Spotify.exe"],
+}
+
+# Closing these closes ALL their windows, so Nova warns you
+WARN_ALL_WINDOWS = {"chrome", "edge"}
 
 
 # ---------- Open / search ----------
@@ -99,6 +115,32 @@ def open_folder(name):
         os.startfile(path)
         return f"Opening your {name} folder..."
     return f"I couldn't find your {name} folder."
+
+
+# ---------- Close an app ----------
+def close_app(name):
+    exes = CLOSABLE.get(name)
+    if not exes:
+        return f"I can't close {name}."
+    closed = False
+    for exe in exes:
+        # No /F: the app is asked to close politely, so it can ask to save your work
+        result = subprocess.run(["taskkill", "/IM", exe], capture_output=True,
+                                creationflags=NO_WINDOW)
+        if result.returncode == 0:
+            closed = True
+    if closed:
+        return f"Closed {name}. If it asks to save, answer it in that window."
+    return f"{name} doesn't seem to be running."
+
+
+# ---------- Type text ----------
+def type_text(payload):
+    if not winfocus.focus_last():
+        return "Windows wouldn't let me switch to that window. Click it first, then try again."
+    time.sleep(0.3)
+    keyboard.write(payload, delay=0.01)
+    return f"Typed {len(payload)} characters."
 
 
 # ---------- Volume (uses the keyboard's volume keys; each press is about 2%) ----------
@@ -219,11 +261,38 @@ def run_local(text):
     return None
 
 
+def handle_type(text):
+    """'type hello world' -> asks for confirmation, then types into your last window."""
+    payload = text[4:].strip()
+    if not payload:
+        return "What should I type? Example: type hello world", None
+    if not is_allowed("type"):
+        return "That action isn't allowed.", None
+
+    payload = payload[:MAX_TYPE]
+    hwnd = winfocus.last_external
+    if not winfocus.is_valid(hwnd):
+        return "Click the window you want to type into first, then use Nova again.", None
+
+    window_title = winfocus.title(hwnd)
+    # Only the length is logged, never the text itself (it could be private)
+    log_action("type", f"{len(payload)} characters into '{window_title}'", "pending")
+    pending = {"kind": "type", "run": lambda: type_text(payload)}
+    return (f'Type "{payload}" into "{window_title}"? '
+            f"Type yes to confirm or no to cancel."), pending
+
+
 def run_command(text):
     """Returns (reply, pending). pending is None unless Nova needs you to confirm."""
     text = text.strip()
     if not text:
         return "Type a command.", None
+
+    # "type ..." is handled first, and its text is never logged
+    low = text.lower()
+    if low == "type" or low.startswith("type "):
+        log_action("command", "type (text hidden)", "received")
+        return handle_type(text)
 
     log_action("command", text, "received")
 
@@ -240,6 +309,17 @@ def run_command(text):
     if not is_allowed(action):
         log_action("blocked", f"{action} {target}", "blocked")
         return "That action isn't allowed.", None
+
+    if action == "close":
+        if target not in CLOSABLE:
+            return f"I can't close {target}.", None
+        extra = " This closes ALL of its windows and tabs." if target in WARN_ALL_WINDOWS else ""
+        if needs_confirmation("close"):
+            pending = {"kind": "close", "run": lambda: close_app(target)}
+            log_action("close", f"{target} (waiting for confirmation)", "pending")
+            return (f"Do you really want to close {target}?{extra} "
+                    f"Type yes to confirm or no to cancel."), pending
+        return close_app(target), None
 
     if action in SYSTEM:
         func, question = SYSTEM[action]

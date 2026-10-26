@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdi
                              QPushButton, QTextBrowser, QApplication)
 from PyQt6.QtCore import (Qt, QPropertyAnimation, QPoint, QEasingCurve,
                           QTimer, QEvent, QThread, pyqtSignal)
+from core import winfocus
 from core.actions import run_command, confirm_pending, cancel_pending
 from core.voice import VoiceWorker
 
@@ -186,6 +187,12 @@ class Panel(QWidget):
         self.hide_timer.setSingleShot(True)
         self.hide_timer.setInterval(HIDE_DELAY)
         self.hide_timer.timeout.connect(self.try_collapse)
+
+        # --- Timer that remembers your last window (so "type ..." knows where to type) ---
+        self.track_timer = QTimer(self)
+        self.track_timer.setInterval(250)
+        self.track_timer.timeout.connect(lambda: winfocus.track(int(self.winId())))
+        self.track_timer.start()
 
         self.add_message("nova", "How can I help you? Type a command, or press the mic and speak.")
 

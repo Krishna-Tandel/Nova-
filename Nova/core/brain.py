@@ -5,7 +5,7 @@ from datetime import datetime
 # Words in a sentence -> which app or website to open.
 # The names on the left must match the keys in APPS / WEBSITES (actions.py).
 KEYWORDS = {
-    "notepad": ["write", "writing", "note", "notes", "text editor", "jot", "type something"],
+    "notepad": ["write", "writing", "note", "notes", "text editor", "jot"],
     "calculator": ["calculate", "calculation", "math", "maths", "add numbers"],
     "paint": ["draw", "drawing", "sketch", "paint"],
     "file explorer": ["files", "explorer"],
@@ -82,8 +82,23 @@ def ask_brain(text):
     if ("date" in words or "today" in words) and ("what" in words or "tell" in words or len(words) == 1):
         return _chat("Today is " + datetime.now().strftime("%A, %d %B %Y"))
     if t == "help" or "what can you do" in t:
-        return _chat("Try: open notepad, search python, volume up, set volume 40, "
-                     "mute, screenshot, open downloads folder, lock pc, shutdown.")
+        return _chat("Try: open notepad, close notepad, type hello world, search python, "
+                     "volume up, set volume 40, mute, screenshot, open downloads folder, "
+                     "lock pc, shutdown.")
+
+    # ---------- Close an app ----------
+    m = re.match(r"^(close|quit|exit)\s+(.+)$", t)
+    if m:
+        from core import actions
+        names = list(actions.CLOSABLE)
+        rest = [w for w in m.group(2).split() if w not in FILLER]
+        target = " ".join(rest)
+        if target in names:
+            return _system("close", target)
+        close = difflib.get_close_matches(target, names, n=1, cutoff=0.7)
+        if close:
+            return _system("close", close[0])
+        return _chat("I can only close: " + ", ".join(names) + ".")
 
     # ---------- Web search ----------
     for prefix in SEARCH_STRIP:

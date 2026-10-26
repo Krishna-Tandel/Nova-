@@ -18,7 +18,7 @@ NUMBERS = {
     "ninety": 90, "hundred": 100,
 }
 
-# Fixed phrases. App, website and folder commands are added automatically.
+# Fixed phrases. App, website, folder and close commands are added automatically.
 BASE_COMMANDS = [
     "volume up", "volume down", "mute", "unmute", "louder", "quieter",
     "take a screenshot", "screenshot",
@@ -42,6 +42,8 @@ def build_commands():
     cmds = list(BASE_COMMANDS)
     for name in list(actions.APPS) + list(actions.WEBSITES) + list(actions.FOLDERS):
         cmds.append("open " + name)
+    for name in actions.CLOSABLE:
+        cmds.append("close " + name)
     for word in NUMBERS:
         cmds.append("set volume " + word)
     return list(dict.fromkeys(cmds))  # remove duplicates, keep order
