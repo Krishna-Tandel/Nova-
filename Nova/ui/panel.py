@@ -5,7 +5,7 @@ from PyQt6.QtCore import (Qt, QPropertyAnimation, QPoint, QEasingCurve,
                           QTimer, QEvent, QThread, pyqtSignal)
 from core import winfocus
 from core.actions import run_command, confirm_pending, cancel_pending
-from core.voice import VoiceWorker
+from core.voice import VoiceWorker, CONFIRM_PHRASES
 
 STRIP = 8         # pixels still visible when the panel is hidden
 MARGIN = 10       # gap from the screen edge when the panel is open
@@ -13,7 +13,11 @@ SLIDE_MS = 220    # slide animation time
 HIDE_DELAY = 400  # wait before sliding back in after the mouse leaves
 
 NORMAL_HINT = "Type a command..."
-CONFIRM_HINT = "Type yes or no..."
+CONFIRM_HINT = "Say or type yes / no..."
+
+YES_WORDS = {"yes", "y", "yes confirm"}
+# These need the longer phrase "yes confirm" when answered by voice
+STRICT_VOICE = {"shutdown", "restart"}
 
 
 class CommandWorker(QThread):
@@ -72,8 +76,9 @@ class Panel(QWidget):
         self.expanded = False
         self.worker = None
         self.voice = None
-        self.pending = None        # an action waiting for yes / no
-        self.spoken_text = None    # text heard by voice, run after the mic thread ends
+        self.pending = None           # an action waiting for yes / no
+        self.spoken_text = None       # text heard by voice, run after the mic thread ends
+        self.confirm_by_voice = False # the command was spoken, so listen for the answer too
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -302,6 +307,7 @@ class Panel(QWidget):
         if self.pending is not None:
             cancel_pending(self.pending)
             self.pending = None
+            self.confirm_by_voice = False
             self.input.setPlaceholderText(NORMAL_HINT)
 
     # ---------- Sending a command (typed or spoken) ----------
@@ -328,32 +334,50 @@ class Panel(QWidget):
         # An action is waiting for yes / no
         if self.pending is not None:
             answer = text.lower()
-            if answer in ("yes", "y"):
-                if spoken:
-                    # Safety: a risky action must be confirmed by typing, never by voice
-                    self.add_message("nova", "For safety, please TYPE yes to confirm.")
+            kind = self.pending["kind"]
+
+            if answer in YES_WORDS:
+                # shutdown / restart by voice need the longer phrase "yes confirm"
+                if spoken and kind in STRICT_VOICE and answer != "yes confirm":
+                    self.add_message("nova", f"To {kind} by voice, say \"yes confirm\". "
+                                             f"Or type yes.")
+                    QTimer.singleShot(400, self.start_voice)  # listen again, still waiting
                     return
                 pending, self.pending = self.pending, None
+                self.confirm_by_voice = False
                 self.input.setPlaceholderText(NORMAL_HINT)
                 self.add_message("nova", confirm_pending(pending))
             else:
                 pending, self.pending = self.pending, None
+                self.confirm_by_voice = False
                 self.input.setPlaceholderText(NORMAL_HINT)
                 self.add_message("nova", cancel_pending(pending))
             self.set_status("Ready")
             return
 
+        # A new command: remember if it was spoken, so Nova can listen for the answer
+        self.confirm_by_voice = spoken
         self.set_status("Thinking...")
         self.worker = CommandWorker(text)
         self.worker.done.connect(self.show_reply)
+        self.worker.finished.connect(self.on_worker_finished)
         self.worker.start()
 
     def show_reply(self, text, pending):
-        self.add_message("nova", text)
         self.pending = pending
         if pending is not None:
             self.input.setPlaceholderText(CONFIRM_HINT)
+            if self.confirm_by_voice:
+                phrase = "yes confirm" if pending["kind"] in STRICT_VOICE else "yes"
+                text += f"\nListening for your answer: say \"{phrase}\" or \"no\"."
+        self.add_message("nova", text)
         self.set_status("Ready")
+
+    def on_worker_finished(self):
+        # The command thread has fully ended. If it needs an answer, listen for it.
+        if self.confirm_by_voice and self.pending is not None:
+            self.confirm_by_voice = False
+            QTimer.singleShot(200, self.start_voice)
 
     # ---------- Voice ----------
     def start_voice(self):
@@ -363,7 +387,9 @@ class Panel(QWidget):
         self.slide_out()
         self.mic.setEnabled(False)
         self.set_status("Starting mic...")
-        self.voice = VoiceWorker()
+        # While waiting for an answer, listen only for yes / no
+        phrases = CONFIRM_PHRASES if self.pending is not None else None
+        self.voice = VoiceWorker(phrases)
         self.voice.status.connect(self.set_status)
         self.voice.heard.connect(self.on_voice_heard)
         self.voice.failed.connect(self.on_voice_failed)

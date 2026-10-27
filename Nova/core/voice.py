@@ -27,6 +27,9 @@ BASE_COMMANDS = [
     "no", "cancel", "help", "hello",
 ]
 
+# The only phrases Nova listens for while it is waiting for your answer
+CONFIRM_PHRASES = ["yes", "yes confirm", "no", "cancel"]
+
 
 def find_model():
     """Returns the folder that really contains the model (it has 'am' and 'conf')."""
@@ -68,10 +71,15 @@ _model = None  # loaded once, then reused
 
 
 class VoiceWorker(QThread):
-    """Listens for ONE command in the background, fully offline."""
+    """Listens for ONE command in the background, fully offline.
+    Pass phrases=CONFIRM_PHRASES to listen only for yes / no."""
     status = pyqtSignal(str)
     heard = pyqtSignal(str)
     failed = pyqtSignal(str)
+
+    def __init__(self, phrases=None):
+        super().__init__()
+        self.phrases = phrases
 
     def run(self):
         global _model
@@ -94,7 +102,8 @@ class VoiceWorker(QThread):
                 _model = Model(path)
                 print("[voice] model loaded")
 
-            grammar = json.dumps(build_commands() + ["[unk]"])
+            phrases = self.phrases if self.phrases else build_commands()
+            grammar = json.dumps(list(phrases) + ["[unk]"])
             rec = KaldiRecognizer(_model, SAMPLE_RATE, grammar)
             audio = queue.Queue()
 
