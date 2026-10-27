@@ -111,7 +111,7 @@ class VoiceWorker(QThread):
                 audio.put(bytes(indata))
 
             self.status.emit("Listening...")
-            print("[voice] listening...")
+            print("[voice] listening for:", "yes / no" if self.phrases else "commands")
             deadline = time.time() + LISTEN_SECONDS
 
             with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=4000, dtype="int16",
