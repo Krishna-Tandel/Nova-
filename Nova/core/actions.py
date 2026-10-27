@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import subprocess
 import webbrowser
@@ -15,9 +16,14 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 HOME = os.path.expanduser("~")
 MAX_TYPE = 300  # longest text Nova will type in one go
 
+# Which browser Nova uses for searches, websites and web addresses.
+# Choose: "chrome", "edge" or "default" (your Windows default browser)
+BROWSER = "chrome"
+
 # App name you type -> what Windows should launch.
-# To add your own app, add a line with its full path, for example:
-# "discord": r"C:\Users\Krish\AppData\Local\Discord\Update.exe",
+# To add your own app, add a line with its full path ending in .exe, for example:
+# "discord": r"C:\Users\Krish\AppData\Local\Discord\app-1.0.9\Discord.exe",
+# Nova can then open it AND close it automatically.
 APPS = {
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
@@ -50,19 +56,134 @@ FOLDERS = {
     "videos": "Videos",
 }
 
-# Apps Nova is allowed to close: name -> process names.
-# "explorer" is NOT here on purpose: closing it removes your taskbar.
-CLOSABLE = {
+# ---------- Browsers ----------
+BROWSER_EXES = {"chrome": "chrome.exe", "edge": "msedge.exe"}
+BROWSER_LABEL = {"chrome": "Chrome", "edge": "Edge"}
+
+
+def find_browser(name):
+    """Finds the real path of Chrome or Edge. Returns None if not found."""
+    exe = BROWSER_EXES.get(name)
+    if not exe:
+        return None
+
+    # 1) Windows registry (works for almost every install)
+    try:
+        import winreg
+        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths" + "\\" + exe
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(root, key_path) as key:
+                    path, _ = winreg.QueryValueEx(key, "")
+                    if path and os.path.isfile(path):
+                        return path
+            except OSError:
+                pass
+    except ImportError:
+        pass
+
+    # 2) Usual install folders
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    local = os.environ.get("LocalAppData", "")
+    if name == "chrome":
+        candidates = [
+            os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+        ]
+    else:
+        candidates = [
+            os.path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+        ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def open_url(url, browser=None):
+    """Opens a web address in the chosen browser. Returns the browser's name."""
+    browser = browser or BROWSER
+    if browser in BROWSER_EXES:
+        path = find_browser(browser)
+        if path:
+            try:
+                subprocess.Popen([path, url])
+                return BROWSER_LABEL[browser]
+            except OSError:
+                pass
+    webbrowser.open(url)
+    return "your browser"
+
+
+_BROWSER_WORDS = r"(google\s+chrome|microsoft\s+edge|chrome|edge)"
+
+
+def _browser_key(word):
+    return "edge" if "edge" in word else "chrome"
+
+
+def split_browser(query):
+    """'python in chrome' -> ('python', 'chrome'). No browser mentioned -> (query, None)."""
+    q = query.strip()
+    m = re.match(r"^(.+?)\s+(?:in|on|using|with|via)\s+" + _BROWSER_WORDS + r"$", q, re.I)
+    if m:
+        return m.group(1).strip(), _browser_key(m.group(2).lower())
+    m = re.match(r"^(?:in|on|using|with|via)\s+" + _BROWSER_WORDS + r"\s+(?:for\s+)?(.+)$", q, re.I)
+    if m:
+        return m.group(2).strip(), _browser_key(m.group(1).lower())
+    m = re.match(r"^" + _BROWSER_WORDS + r"\s+for\s+(.+)$", q, re.I)
+    if m:
+        return m.group(2).strip(), _browser_key(m.group(1).lower())
+    return q, None
+
+
+# ---------- What can be closed ----------
+EXPLORER_WINDOWS = "@explorer-windows"  # special: close Explorer windows, not explorer.exe
+
+# Process names for apps whose launch name differs from their process name
+PROCESSES = {
     "notepad": ["notepad.exe"],
     "calculator": ["CalculatorApp.exe", "Calculator.exe", "win32calc.exe"],
-    "paint": ["mspaint.exe"],
+    "calc": ["CalculatorApp.exe", "Calculator.exe", "win32calc.exe"],
+    "paint": ["mspaint.exe", "PaintStudio.View.exe"],
+    "cmd": ["cmd.exe"],
+    "command prompt": ["cmd.exe"],
+    "task manager": ["Taskmgr.exe"],
     "chrome": ["chrome.exe"],
     "edge": ["msedge.exe"],
+    "settings": ["SystemSettings.exe"],
     "spotify": ["Spotify.exe"],
 }
 
+# Nova refuses to close these, because it would break Windows or Nova itself
+PROTECTED = {"explorer.exe", "python.exe", "pythonw.exe", "py.exe",
+             "winlogon.exe", "csrss.exe", "svchost.exe", "wininit.exe"}
+
 # Closing these closes ALL their windows, so Nova warns you
-WARN_ALL_WINDOWS = {"chrome", "edge"}
+WARN_ALL_WINDOWS = {"chrome", "edge", "cmd", "command prompt",
+                    "file explorer", "explorer"}
+
+
+def _build_closable():
+    """Every app in APPS can be closed. Apps you add with a full .exe path work automatically."""
+    closable = {}
+    for name, target in APPS.items():
+        if name in PROCESSES:
+            closable[name] = list(PROCESSES[name])
+        elif target.lower().endswith(".exe"):
+            exe = os.path.basename(target)
+            if exe.lower() not in PROTECTED:
+                closable[name] = [exe]
+    # File Explorer is special: close its windows only, never explorer.exe (your taskbar)
+    closable["file explorer"] = [EXPLORER_WINDOWS]
+    closable["explorer"] = [EXPLORER_WINDOWS]
+    return closable
+
+
+CLOSABLE = _build_closable()
 
 
 # ---------- Open / search ----------
@@ -72,6 +193,17 @@ def open_target(name):
     for filler in ("the ", "my "):
         if name.startswith(filler):
             name = name[len(filler):]
+
+    # Chrome and Edge: use their real install path
+    if name in BROWSER_EXES:
+        path = find_browser(name)
+        if path:
+            try:
+                subprocess.Popen([path])
+                log_action("open", name, "done")
+                return f"Opening {BROWSER_LABEL[name]}..."
+            except OSError:
+                pass
 
     if name in APPS:
         try:
@@ -83,27 +215,27 @@ def open_target(name):
             return f"I couldn't open {name}. Check its path in actions.py."
 
     if name in WEBSITES:
-        webbrowser.open(WEBSITES[name])
+        used = open_url(WEBSITES[name])
         log_action("open", name, "done")
-        return f"Opening {name}..."
+        return f"Opening {name} in {used}..."
 
     # Looks like a web address, e.g. "github.com"
     if "." in name and " " not in name:
-        webbrowser.open(name if name.startswith("http") else "https://" + name)
+        used = open_url(name if name.startswith("http") else "https://" + name)
         log_action("open", name, "done")
-        return f"Opening {name}..."
+        return f"Opening {name} in {used}..."
 
     log_action("open", name, "unknown")
     return f"I don't know '{name}' yet. Add it to APPS in core/actions.py."
 
 
 def web_search(query):
-    query = query.strip()
+    query, browser = split_browser(query)
     if not query:
         return "What should I search for?"
-    webbrowser.open("https://www.google.com/search?q=" + quote_plus(query))
-    log_action("search", query, "done")
-    return f"Searching for: {query}"
+    used = open_url("https://www.google.com/search?q=" + quote_plus(query), browser)
+    log_action("search", f"{query} (in {used})", "done")
+    return f"Searching in {used} for: {query}"
 
 
 def open_folder(name):
@@ -118,19 +250,46 @@ def open_folder(name):
 
 
 # ---------- Close an app ----------
+def close_explorer_windows():
+    """Closes File Explorer windows only. The taskbar and desktop are not touched."""
+    script = "(New-Object -ComObject Shell.Application).Windows() | ForEach-Object { $_.Quit() }"
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                capture_output=True, creationflags=NO_WINDOW, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return "I couldn't close the File Explorer windows."
+    if result.returncode == 0:
+        return "Closed your File Explorer windows."
+    return "I couldn't close the File Explorer windows."
+
+
 def close_app(name):
     exes = CLOSABLE.get(name)
     if not exes:
         return f"I can't close {name}."
+
+    if exes == [EXPLORER_WINDOWS]:
+        return close_explorer_windows()
+
+    if any(e.lower() in PROTECTED for e in exes):
+        return f"I won't close {name}, because it's protected."
+
     closed = False
+    refused = False
     for exe in exes:
         # No /F: the app is asked to close politely, so it can ask to save your work
         result = subprocess.run(["taskkill", "/IM", exe], capture_output=True,
                                 creationflags=NO_WINDOW)
         if result.returncode == 0:
             closed = True
+        elif result.returncode != 128:   # 128 means "not running"
+            refused = True
+
     if closed:
         return f"Closed {name}. If it asks to save, answer it in that window."
+    if refused:
+        return (f"Windows wouldn't let me close {name}. "
+                f"It may need administrator rights.")
     return f"{name} doesn't seem to be running."
 
 
@@ -313,7 +472,7 @@ def run_command(text):
     if action == "close":
         if target not in CLOSABLE:
             return f"I can't close {target}.", None
-        extra = " This closes ALL of its windows and tabs." if target in WARN_ALL_WINDOWS else ""
+        extra = " This closes ALL of its windows." if target in WARN_ALL_WINDOWS else ""
         if needs_confirmation("close"):
             pending = {"kind": "close", "run": lambda: close_app(target)}
             log_action("close", f"{target} (waiting for confirmation)", "pending")
