@@ -2,9 +2,9 @@ import math
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QScrollArea, QFrame, QApplication,
                              QGraphicsOpacityEffect)
-from PyQt6.QtCore import (Qt, QPropertyAnimation, QParallelAnimationGroup, QPoint,
-                          QPointF, QRectF, QEasingCurve, QTimer, QEvent, QThread,
-                          pyqtSignal)
+from PyQt6.QtCore import (Qt, QObject, QPropertyAnimation, QParallelAnimationGroup,
+                          QVariantAnimation, QPoint, QPointF, QRect, QRectF,
+                          QEasingCurve, QTimer, QEvent, QThread, pyqtSignal)
 from PyQt6.QtGui import QPainter, QColor, QPen, QFontMetrics
 from core import winfocus
 from core.actions import run_command, confirm_pending, cancel_pending
@@ -17,11 +17,14 @@ STRIP = 8              # pixels of the card still visible when the panel is hidd
 MARGIN = 10            # gap from the screen edge when the panel is open
 SHADOW = 14            # size of the soft glow around the card
 RADIUS = 20            # roundness of the card corners
-SLIDE_OUT_MS = 340     # coming-in animation time
-SLIDE_IN_MS = 240      # going-away animation time
-FADE_CLOSED = 0.6      # how see-through the hidden strip is (1.0 = solid)
 HIDE_DELAY = 400       # wait before sliding away after the mouse leaves
 BUBBLE_MAX = 270       # widest a chat bubble can be
+
+SPRING = True          # iOS-style springy slide-in (False = smooth, no bounce)
+SPRING_DAMPING = 0.7   # lower = bouncier (0.5 very bouncy, 0.9 almost none)
+SLIDE_OUT_MS = 420     # coming-in time (a spring needs a little longer)
+SLIDE_IN_MS = 260      # going-away time
+FADE_CLOSED = 0.6      # how see-through the hidden strip is (1.0 = solid)
 
 # ---------------- Colors ----------------
 BG = "#1e1e2e"
@@ -31,6 +34,7 @@ YELLOW = "#f9e2af"
 TEXT = "#cdd6f4"
 SUBTEXT = "#9399b2"
 SURFACE = "#313244"
+SURFACE_HOVER = "#45475a"
 
 STATE_COLORS = {"idle": PURPLE, "listening": GREEN, "thinking": YELLOW}
 
@@ -48,6 +52,80 @@ CHIPS = [
 YES_WORDS = {"yes", "y", "yes confirm"}
 # These need the longer phrase "yes confirm" when answered by voice
 STRICT_VOICE = {"shutdown", "restart"}
+
+
+# ---------------- Animation helpers ----------------
+def spring_progress(t):
+    """iOS-style spring: runs a little past 1.0, then settles back."""
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    z = SPRING_DAMPING
+    settle = 6.0
+    wd = (settle / z) * math.sqrt(1.0 - z * z)
+    return 1.0 - math.exp(-settle * t) * (math.cos(wd * t) + (settle / wd) * math.sin(wd * t))
+
+
+def spring_curve():
+    curve = QEasingCurve()
+    curve.setCustomType(spring_progress)
+    return curve
+
+
+def mix(a, b, t):
+    """Blends two colors. t=0 gives a, t=1 gives b."""
+    a, b = QColor(a), QColor(b)
+    t = max(0.0, min(1.0, t))
+    return QColor(int(a.red() + (b.red() - a.red()) * t),
+                  int(a.green() + (b.green() - a.green()) * t),
+                  int(a.blue() + (b.blue() - a.blue()) * t))
+
+
+class Tween(QObject):
+    """Smoothly moves a number toward a target (used for hover, press, fades)."""
+    changed = pyqtSignal()
+
+    def __init__(self, value=0.0, parent=None):
+        super().__init__(parent)
+        self.value = value
+        self._anim = QVariantAnimation(self)
+        self._anim.valueChanged.connect(self._on_value)
+
+    def to(self, target, ms=160, kind=QEasingCurve.Type.InOutCubic):
+        self._anim.stop()
+        self._anim.setDuration(ms)
+        self._anim.setEasingCurve(kind)
+        self._anim.setStartValue(float(self.value))
+        self._anim.setEndValue(float(target))
+        self._anim.start()
+
+    def _on_value(self, v):
+        self.value = float(v)
+        self.changed.emit()
+
+
+class ColorFader(QObject):
+    """A color that crossfades to a new color instead of jumping."""
+    changed = pyqtSignal()
+
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self.color = QColor(color)
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(300)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._anim.valueChanged.connect(self._on_value)
+
+    def fade_to(self, color):
+        self._anim.stop()
+        self._anim.setStartValue(QColor(self.color))
+        self._anim.setEndValue(QColor(color))
+        self._anim.start()
+
+    def _on_value(self, v):
+        self.color = QColor(v)
+        self.changed.emit()
 
 
 class CommandWorker(QThread):
@@ -99,7 +177,8 @@ class HistoryLineEdit(QLineEdit):
 
 
 class MicButton(QPushButton):
-    """Round mic button. Pulses green while listening, spins yellow while thinking."""
+    """Round mic button. Pulses green while listening, spins yellow while thinking.
+    Shrinks slightly when pressed and pops back when released."""
 
     def __init__(self):
         super().__init__()
@@ -108,8 +187,14 @@ class MicButton(QPushButton):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setToolTip("Speak a command (Ctrl+Alt+Space). Click again to stop listening.")
         self.state = "idle"
+        self._shape = "listening"      # which effect to draw while it fades out
         self._phase = 0.0
-        self._hover = False
+        self._color = ColorFader(PURPLE, self)
+        self._active = Tween(0.0, self)   # 0 = idle look, 1 = listening / thinking look
+        self._hover = Tween(0.0, self)
+        self._press = Tween(0.0, self)
+        for obj in (self._color, self._active, self._hover, self._press):
+            obj.changed.connect(self.update)
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._tick)
@@ -118,48 +203,64 @@ class MicButton(QPushButton):
         if state == self.state:
             return
         self.state = state
+        self._color.fade_to(STATE_COLORS[state])
         if state == "idle":
-            self._timer.stop()
-            self._phase = 0.0
+            self._active.to(0.0, 260)
         else:
-            self._timer.start()
-        self.update()
+            self._shape = state
+            self._active.to(1.0, 220)
+            if not self._timer.isActive():
+                self._timer.start()
 
     def _tick(self):
         self._phase = (self._phase + 0.025) % 1.0
+        # Keep animating until the effect has faded out, then stop to save power
+        if self.state == "idle" and self._active.value < 0.01:
+            self._timer.stop()
+            self._phase = 0.0
         self.update()
 
     def enterEvent(self, event):
-        self._hover = True
-        self.update()
+        self._hover.to(1.0, 140)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self._hover = False
-        self.update()
+        self._hover.to(0.0, 220)
+        self._press.to(0.0, 160)
         super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        self._press.to(1.0, 90)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press.to(0.0, 340, QEasingCurve.Type.OutBack)   # springs back
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         cx, cy = self.width() / 2, self.height() / 2
         base_r = 17
-        color = QColor(STATE_COLORS[self.state])
+        color = self._color.color
+        active = max(0.0, min(1.0, self._active.value))
 
-        if self.state == "listening":
+        if active > 0.01 and self._shape == "listening":
             # Two rings that grow outward and fade, like a sound wave
             for k in range(2):
                 t = (self._phase + k * 0.5) % 1.0
                 r = base_r + t * (min(cx, cy) - base_r - 1)
                 ring = QColor(color)
-                ring.setAlpha(int(170 * (1 - t)))
+                ring.setAlpha(int(170 * (1 - t) * active))
                 p.setPen(QPen(ring, 2))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(QPointF(cx, cy), r, r)
 
-        if self.state == "thinking":
+        if active > 0.01 and self._shape == "thinking":
             # A short arc that spins around the button
-            pen = QPen(color, 3)
+            arc = QColor(color)
+            arc.setAlpha(int(255 * active))
+            pen = QPen(arc, 3)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -167,13 +268,15 @@ class MicButton(QPushButton):
             p.drawArc(QRectF(cx - rr, cy - rr, rr * 2, rr * 2),
                       int(-self._phase * 360 * 16), 100 * 16)
 
-        # Button body
-        if self.state == "idle":
-            fill = QColor("#45475a") if self._hover else QColor(SURFACE)
-            glyph = QColor(color)
-        else:
-            fill = QColor(color)
-            glyph = QColor(BG)
+        # Press feedback: the button itself shrinks a little
+        scale = 1.0 - 0.10 * self._press.value
+        p.translate(cx, cy)
+        p.scale(scale, scale)
+        p.translate(-cx, -cy)
+
+        idle_fill = mix(SURFACE, SURFACE_HOVER, self._hover.value)
+        fill = mix(idle_fill, color, active)
+        glyph = mix(color, BG, active)
         p.setPen(QPen(color, 1.5))
         p.setBrush(fill)
         p.drawEllipse(QPointF(cx, cy), base_r, base_r)
@@ -200,6 +303,10 @@ class StatusPill(QWidget):
         self.state = "idle"
         self.text = "Ready"
         self._phase = 0.0
+        self._color = ColorFader(SUBTEXT, self)
+        self._active = Tween(0.0, self)
+        for obj in (self._color, self._active):
+            obj.changed.connect(self.update)
         self._timer = QTimer(self)
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._tick)
@@ -208,21 +315,27 @@ class StatusPill(QWidget):
         self.text = text
         if state != self.state:
             self.state = state
+            self._color.fade_to(SUBTEXT if state == "idle" else STATE_COLORS[state])
             if state == "idle":
-                self._timer.stop()
-                self._phase = 0.0
+                self._active.to(0.0, 240)
             else:
-                self._timer.start()
+                self._active.to(1.0, 200)
+                if not self._timer.isActive():
+                    self._timer.start()
         self.update()
 
     def _tick(self):
         self._phase = (self._phase + 0.04) % 1.0
+        if self.state == "idle" and self._active.value < 0.01:
+            self._timer.stop()
+            self._phase = 0.0
         self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor(SUBTEXT if self.state == "idle" else STATE_COLORS[self.state])
+        color = self._color.color
+        active = max(0.0, min(1.0, self._active.value))
 
         bg = QColor(color)
         bg.setAlpha(30)
@@ -230,10 +343,9 @@ class StatusPill(QWidget):
         p.setBrush(bg)
         p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 13, 13)
 
+        pulse = 0.5 + 0.5 * math.sin(self._phase * 2 * math.pi)
         dot = QColor(color)
-        if self.state != "idle":
-            pulse = 0.5 + 0.5 * math.sin(self._phase * 2 * math.pi)
-            dot.setAlpha(int(110 + 145 * pulse))
+        dot.setAlpha(int(255 - active * 145 * (1 - pulse)))
         p.setBrush(dot)
         p.drawEllipse(QPointF(14, self.height() / 2), 4, 4)
 
@@ -243,6 +355,36 @@ class StatusPill(QWidget):
         p.setFont(font)
         p.drawText(QRectF(26, 0, self.width() - 32, self.height()),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text)
+
+
+class TypingDots(QWidget):
+    """Three bouncing dots in a bubble, like the 'typing...' bubble in iMessage."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(64, 36)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    def _tick(self):
+        self._phase = (self._phase + 0.03) % 1.0
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(SURFACE))
+        p.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 14, 14)
+        for i in range(3):
+            wave = max(0.0, math.sin((self._phase - i * 0.12) * 2 * math.pi))
+            dot = QColor(TEXT)
+            dot.setAlpha(int(110 + 145 * wave))
+            p.setBrush(dot)
+            p.drawEllipse(QPointF(20 + i * 12, self.height() / 2 - 4 * wave), 3.5, 3.5)
 
 
 class Panel(QWidget):
@@ -256,7 +398,10 @@ class Panel(QWidget):
         self.pending = None            # an action waiting for yes / no
         self.spoken_text = None        # text heard by voice, run after the mic thread ends
         self.confirm_by_voice = False  # the command was spoken, so listen for the answer too
-        self.accent = QColor(PURPLE)   # border and glow color (changes with Nova's state)
+        self._typing_row = None        # the "typing..." bubble while Nova is working
+        self._chips_hidden = False
+        self.accent_fader = ColorFader(PURPLE, self)   # border and glow color
+        self.accent_fader.changed.connect(self.update)
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -304,11 +449,12 @@ class Panel(QWidget):
         box_layout.setContentsMargins(3, 3, 3, 3)
         box_layout.addWidget(self.scroll)
 
-        # --- Quick buttons (hidden after your first command) ---
+        # --- Quick buttons (fade in one by one, collapse after your first command) ---
         self.chips = QWidget()
         chip_row = QHBoxLayout(self.chips)
         chip_row.setContentsMargins(0, 0, 0, 0)
         chip_row.setSpacing(6)
+        chip_buttons = []
         for label, command in CHIPS:
             btn = QPushButton(label)
             btn.setObjectName("chip")
@@ -316,6 +462,7 @@ class Panel(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.clicked.connect(lambda _checked=False, c=command: self.on_chip(c))
             chip_row.addWidget(btn)
+            chip_buttons.append(btn)
         chip_row.addStretch(1)
 
         # --- Input row: text box + mic ---
@@ -440,24 +587,143 @@ class Panel(QWidget):
 
         self.add_message("nova", "Hi! I'm Nova. Type a command, press a quick button, "
                                  "or click the mic and speak.")
+        for i, btn in enumerate(chip_buttons):
+            self._fade_in_later(btn, 350 + i * 80)
+
+    # The border and glow color (it crossfades when Nova's state changes)
+    @property
+    def accent(self):
+        return self.accent_fader.color
 
     # ---------- Drawing the card and its glow ----------
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         card = QRectF(SHADOW, SHADOW, self.width() - 2 * SHADOW, self.height() - 2 * SHADOW)
+        accent = self.accent
 
         # Soft glow: layers that get fainter the further they are from the card
         for i in range(1, SHADOW + 1):
-            glow = QColor(self.accent)
+            glow = QColor(accent)
             glow.setAlpha(int(40 * (1 - (i - 1) / SHADOW) ** 2))
             p.setPen(QPen(glow, 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(card.adjusted(-i, -i, i, i), RADIUS + i, RADIUS + i)
 
-        p.setPen(QPen(self.accent, 2))
+        p.setPen(QPen(accent, 2))
         p.setBrush(QColor(BG))
         p.drawRoundedRect(card.adjusted(1, 1, -1, -1), RADIUS, RADIUS)
+
+    # ---------- Small animation helpers ----------
+    def _fade_in_later(self, widget, delay_ms):
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(0.0)
+        widget.setGraphicsEffect(effect)
+        anim = QVariantAnimation(widget)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(260)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(lambda v: effect.setOpacity(float(v)))
+        anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+        QTimer.singleShot(delay_ms, anim.start)
+
+    def _grow_row(self, row, target, ms=300):
+        """New chat rows grow from nothing, pushing the chat up smoothly while they fade in."""
+        row.setFixedHeight(0)
+        effect = QGraphicsOpacityEffect(row)
+        effect.setOpacity(0.0)
+        row.setGraphicsEffect(effect)
+        anim = QVariantAnimation(row)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def step(v):
+            v = float(v)
+            row.setFixedHeight(max(0, int(target * v)))
+            effect.setOpacity(min(1.0, v * 1.8))
+
+        def done():
+            row.setMinimumHeight(0)
+            row.setMaximumHeight(16777215)
+            row.setGraphicsEffect(None)
+
+        anim.valueChanged.connect(step)
+        anim.finished.connect(done)
+        row._grow_anim = anim
+        anim.start()
+
+    def _shrink_and_remove(self, row, ms=180):
+        old = getattr(row, "_grow_anim", None)
+        if old is not None:
+            old.stop()
+        start_height = max(1, row.height())
+        effect = QGraphicsOpacityEffect(row)
+        row.setGraphicsEffect(effect)
+        anim = QVariantAnimation(row)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        def step(v):
+            v = float(v)
+            row.setFixedHeight(max(0, int(start_height * v)))
+            effect.setOpacity(v)
+
+        def done():
+            row.hide()
+            row.deleteLater()
+
+        anim.valueChanged.connect(step)
+        anim.finished.connect(done)
+        anim.start()
+
+    def _show_typing(self):
+        if self._typing_row is not None:
+            return
+        dots = TypingDots()
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(dots)
+        h.addStretch(1)
+        row.setFixedHeight(0)
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, row)
+        self._typing_row = row
+        self._grow_row(row, dots.height(), 240)
+
+    def _hide_typing(self):
+        row, self._typing_row = self._typing_row, None
+        if row is not None:
+            self._shrink_and_remove(row)
+
+    def _hide_chips(self):
+        if self._chips_hidden:
+            return
+        self._chips_hidden = True
+        start_height = self.chips.height()
+        if start_height <= 0 or not self.chips.isVisible():
+            self.chips.hide()
+            return
+        effect = QGraphicsOpacityEffect(self.chips)
+        self.chips.setGraphicsEffect(effect)
+        anim = QVariantAnimation(self.chips)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setDuration(240)
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        def step(v):
+            v = float(v)
+            self.chips.setFixedHeight(max(0, int(start_height * v)))
+            effect.setOpacity(v)
+
+        anim.valueChanged.connect(step)
+        anim.finished.connect(self.chips.hide)
+        anim.start()
 
     # ---------- Chat display ----------
     def add_message(self, who, text):
@@ -466,14 +732,20 @@ class Panel(QWidget):
         label.setWordWrap(True)
         label.setObjectName({"you": "bubbleYou", "ask": "bubbleAsk"}.get(who, "bubbleNova"))
 
-        # Qt guesses a narrow width for wrapped labels, so measure the text ourselves:
-        # short messages stay on one line, long ones wrap at BUBBLE_MAX
+        # Qt guesses badly for wrapped labels, so measure the text ourselves.
+        # Short messages stay on one line, long ones wrap at BUBBLE_MAX.
         font = label.font()
         font.setPixelSize(14)
         label.setFont(font)
         metrics = QFontMetrics(font)
-        widest_line = max(metrics.horizontalAdvance(line) for line in text.split("\n"))
-        label.setFixedWidth(min(BUBBLE_MAX, widest_line + 32))
+        border = 2 if who == "ask" else 0
+        widest = max(metrics.horizontalAdvance(line) for line in text.split("\n"))
+        width = min(BUBBLE_MAX, widest + 24 + border + 8)
+        text_width = width - 24 - border
+        wrapped = metrics.boundingRect(QRect(0, 0, text_width, 100000),
+                                       Qt.TextFlag.TextWordWrap.value, text)
+        height = wrapped.height() + 16 + border + 2
+        label.setFixedSize(width, height)
 
         row = QWidget()
         h = QHBoxLayout(row)
@@ -484,18 +756,9 @@ class Panel(QWidget):
         else:
             h.addWidget(label)
             h.addStretch(1)
+        row.setFixedHeight(0)
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, row)
-
-        # Fade the new bubble in
-        effect = QGraphicsOpacityEffect(row)
-        row.setGraphicsEffect(effect)
-        anim = QPropertyAnimation(effect, b"opacity", row)
-        anim.setDuration(220)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.finished.connect(lambda r=row: r.setGraphicsEffect(None))
-        anim.start()
+        self._grow_row(row, height, 300)
 
     def _stick_to_bottom(self, _minimum, maximum):
         self.scroll.verticalScrollBar().setValue(maximum)
@@ -509,11 +772,10 @@ class Panel(QWidget):
             state = "idle"
         self.status.set_state(state, text)
         self.mic.set_state(state)
-        self.accent = QColor(STATE_COLORS[state])
+        self.accent_fader.fade_to(STATE_COLORS[state])
         self.input.setProperty("state", state)
         self.input.style().unpolish(self.input)
         self.input.style().polish(self.input)
-        self.update()
 
     # ---------- Positions ----------
     def _points(self):
@@ -525,17 +787,14 @@ class Panel(QWidget):
         closed_pos = QPoint(edge - STRIP - SHADOW, y)
         return open_pos, closed_pos
 
-    def _animate(self, point, opacity, ms, kind):
+    def _animate(self, point, opacity, ms, curve):
         self.group.stop()
-        curve = QEasingCurve(kind)
-        if kind == QEasingCurve.Type.OutBack:
-            curve.setOvershoot(1.0)       # a small, friendly bounce
         self.pos_anim.setDuration(ms)
         self.pos_anim.setEasingCurve(curve)
         self.pos_anim.setStartValue(self.pos())
         self.pos_anim.setEndValue(point)
         self.fade_anim.setDuration(ms)
-        self.fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.fade_anim.setEasingCurve(QEasingCurve(QEasingCurve.Type.OutCubic))
         self.fade_anim.setStartValue(self.windowOpacity())
         self.fade_anim.setEndValue(opacity)
         self.group.start()
@@ -555,7 +814,8 @@ class Panel(QWidget):
         self.expanded = True
         self.show()
         self.raise_()
-        self._animate(open_pos, 1.0, SLIDE_OUT_MS, QEasingCurve.Type.OutBack)
+        curve = spring_curve() if SPRING else QEasingCurve(QEasingCurve.Type.OutCubic)
+        self._animate(open_pos, 1.0, SLIDE_OUT_MS, curve)
         if focus:
             self.activateWindow()
             self.input.setFocus()
@@ -567,7 +827,8 @@ class Panel(QWidget):
         _, closed_pos = self._points()
         self.expanded = False
         self.input.clearFocus()
-        self._animate(closed_pos, FADE_CLOSED, SLIDE_IN_MS, QEasingCurve.Type.InCubic)
+        self._animate(closed_pos, FADE_CLOSED, SLIDE_IN_MS,
+                      QEasingCurve(QEasingCurve.Type.InOutCubic))
 
     def toggle(self):
         if self.expanded:
@@ -640,7 +901,7 @@ class Panel(QWidget):
             self.add_message("nova", "One moment, I'm still busy with the last thing...")
             return
 
-        self.chips.hide()
+        self._hide_chips()
         self.input.remember(text)
         self.add_message("you", ("🎤 " if spoken else "") + text)
 
@@ -671,12 +932,14 @@ class Panel(QWidget):
         # A new command: remember if it was spoken, so Nova can listen for the answer
         self.confirm_by_voice = spoken
         self.set_status("Thinking...")
+        self._show_typing()
         self.worker = CommandWorker(text)
         self.worker.done.connect(self.show_reply)
         self.worker.start()
 
     def show_reply(self, text, pending):
         print("[panel] reply:", text.replace("\n", " "))
+        self._hide_typing()
         self.pending = pending
         listen_for_answer = False
         if pending is not None:
