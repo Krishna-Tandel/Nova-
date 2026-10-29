@@ -1,0 +1,6 @@
+PyQt6
+keyboard
+pillow
+faster-whisper
+sounddevice
+numpy

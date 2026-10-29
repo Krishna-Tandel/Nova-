@@ -162,9 +162,18 @@ def get_model():
 
 def transcribe(audio, confirm_mode=False):
     model = get_model()
-    prompt = None
-    if USE_PROMPT:
-        prompt = CONFIRM_PROMPT if confirm_mode else PROMPT
+
+    if confirm_mode:
+        # Short answers like "yes" need gentler settings:
+        # - no hint text (Whisper can repeat a hint back as if you said it)
+        # - no extra voice filter (it can cut a 0.3 second word)
+        # - no "was that silence?" check (the recorder already heard you speak)
+        segments, _ = model.transcribe(audio, language="en", beam_size=1,
+                                       vad_filter=False,
+                                       condition_on_previous_text=False)
+        return " ".join(s.text for s in segments).strip()
+
+    prompt = PROMPT if USE_PROMPT else None
     segments, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=True,
                                    condition_on_previous_text=False,
                                    initial_prompt=prompt)
